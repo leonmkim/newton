@@ -1216,6 +1216,39 @@ def _extract_trimesh_material_params(
     return roughness, metallic, base_color
 
 
+def _is_gltf_file(filename: str) -> bool:
+    lower = filename.lower()
+    return lower.endswith(".gltf") or lower.endswith(".glb")
+
+
+def _load_trimesh_meshes_from_file(filename: str, trimesh_module):
+    """Load one or more trimesh meshes from a file.
+
+    glTF/GLB files are loaded with ``force="scene"`` so each primitive keeps its
+    own geometry, material, texture, and UV layout. Other formats, including DAE,
+    keep the v1.5.1 ``force="mesh"`` path.
+    """
+    if _is_gltf_file(filename):
+        loaded = trimesh_module.load(filename, force="scene")
+        if hasattr(loaded, "geometry"):
+            return list(loaded.geometry.values())
+
+    if filename.lower().endswith(".dae"):
+        with warnings.catch_warnings():
+            # Remove when the pycollada floor includes a release that replaces
+            # load-time NumPy array shape assignment with reshape.
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Setting the shape on a NumPy array has been deprecated.*",
+                category=DeprecationWarning,
+                module=r"^collada\.",
+            )
+            tri = trimesh_module.load(filename, force="mesh")
+    else:
+        tri = trimesh_module.load(filename, force="mesh")
+    return list(tri.geometry.values()) if hasattr(tri, "geometry") else [tri]
+
+
 def load_meshes_from_file(
     filename: str,
     *,
@@ -1428,20 +1461,7 @@ def load_meshes_from_file(
     if filename.lower().endswith(".dae"):
         dae_face_materials, dae_material_colors = _parse_dae_material_colors(filename)
 
-    if filename.lower().endswith(".dae"):
-        with warnings.catch_warnings():
-            # Remove when the pycollada floor includes a release that replaces
-            # load-time NumPy array shape assignment with reshape.
-            warnings.filterwarnings(
-                "ignore",
-                message=r"Setting the shape on a NumPy array has been deprecated.*",
-                category=DeprecationWarning,
-                module=r"^collada\.",
-            )
-            tri = trimesh.load(filename, force="mesh")
-    else:
-        tri = trimesh.load(filename, force="mesh")
-    tri_meshes = tri.geometry.values() if hasattr(tri, "geometry") else [tri]
+    tri_meshes = _load_trimesh_meshes_from_file(filename, trimesh)
 
     meshes = []
     for tri_mesh in tri_meshes:
