@@ -4,6 +4,10 @@
 
 <!-- towncrier release notes start -->
 
+### Fixed
+
+- Keep glTF/GLB scene primitives as separate geometries with their own materials, textures, and UVs, and write ViewerUSD in-memory RGB textures as opaque RGBA PNGs.
+
 ## [1.5.1] - 2026-08-27
 
 ### Fixed

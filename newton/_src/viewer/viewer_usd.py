@@ -47,6 +47,20 @@ def _usd_add_xform(prim):
     prim.AddScaleOp()
 
 
+def _promote_rgb_uint8_to_opaque_rgba(texture: np.ndarray) -> np.ndarray:
+    """Promote HxWx3 uint8 RGB arrays to opaque RGBA for PNG publication.
+
+    UsdUVTexture sampling of ViewerUSD-exported PNGs is reliable for RGBA.
+    Only HxWx3 uint8 inputs are copied into HxWx4 with alpha 255; the source
+    array is not mutated.
+    """
+    arr = np.asarray(texture)
+    if arr.dtype == np.uint8 and arr.ndim == 3 and arr.shape[-1] == 3:
+        alpha = np.full((*arr.shape[:2], 1), 255, dtype=np.uint8)
+        return np.ascontiguousarray(np.concatenate([arr, alpha], axis=-1))
+    return arr
+
+
 def _usd_set_xform(
     xform,
     pos: tuple | None = None,
@@ -372,6 +386,7 @@ class ViewerUSD(ViewerBase):
             tex_array = load_texture(texture)
             if tex_array is None:
                 return
+            tex_array = _promote_rgb_uint8_to_opaque_rgba(tex_array)
             tex_dir = os.path.dirname(self.output_path)
             safe_name = mesh_name.replace("/", "_").replace("\\", "_")
             tex_path = os.path.join(tex_dir, f"_tex_{safe_name}.png")
