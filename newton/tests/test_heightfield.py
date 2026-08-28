@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton import Heightfield
+from newton._src.utils import is_graph_capture_allocation_enabled
 from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import assert_np_equal
 
@@ -106,20 +107,8 @@ class TestHeightfield(unittest.TestCase):
         model = builder.finalize(device="cpu")
 
         self.assertEqual(model.heightfield_count, 1)
-        with self.assertWarns(DeprecationWarning):
-            self.assertTrue(model.has_heightfields)
 
         empty_model = newton.Model(device="cpu")
-        self.assertEqual(empty_model.heightfield_count, 0)
-        with self.assertWarns(DeprecationWarning):
-            self.assertFalse(empty_model.has_heightfields)
-
-        with self.assertWarns(DeprecationWarning):
-            empty_model.has_heightfields = True
-        self.assertEqual(empty_model.heightfield_count, 1)
-
-        with self.assertWarns(DeprecationWarning):
-            empty_model.has_heightfields = False
         self.assertEqual(empty_model.heightfield_count, 0)
 
     def test_mjcf_hfield_parsing(self):
@@ -287,8 +276,8 @@ class TestHeightfield(unittest.TestCase):
         sim_dt = 1.0 / 240.0
 
         device = model.device
-        use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
-        if use_cuda_graph:
+        use_graph = is_graph_capture_allocation_enabled(device)
+        if use_graph:
             # warmup (2 steps for full ping-pong cycle)
             solver.step(state_in, state_out, control, None, sim_dt)
             solver.step(state_out, state_in, control, None, sim_dt)
@@ -297,14 +286,14 @@ class TestHeightfield(unittest.TestCase):
                 solver.step(state_out, state_in, control, None, sim_dt)
             graph = capture.graph
 
-        remaining = 500 - (4 if use_cuda_graph else 0)
-        for _ in range(remaining // 2 if use_cuda_graph else remaining):
-            if use_cuda_graph:
+        remaining = 500 - (4 if use_graph else 0)
+        for _ in range(remaining // 2 if use_graph else remaining):
+            if use_graph:
                 wp.capture_launch(graph)
             else:
                 solver.step(state_in, state_out, control, None, sim_dt)
                 state_in, state_out = state_out, state_in
-        if use_cuda_graph and remaining % 2 == 1:
+        if use_graph and remaining % 2 == 1:
             solver.step(state_in, state_out, control, None, sim_dt)
             state_in, state_out = state_out, state_in
 
@@ -366,6 +355,218 @@ class TestHeightfield(unittest.TestCase):
         # Should detect at least one contact (sphere is within contact margin of heightfield)
         contact_count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(contact_count, 0, "No contacts detected between sphere and heightfield")
+
+    def _get_contact_kinematics(self, model, state, *, reduce_contacts=True):
+        """Return contact distances, normals, and heightfield points for a model state."""
+        pipeline = newton.CollisionPipeline(
+            model,
+            reduce_contacts=reduce_contacts,
+            requires_grad=True,
+        )
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        return (
+            contacts.rigid_contact_diff_distance.numpy()[:count],
+            contacts.rigid_contact_diff_normal.numpy()[:count],
+            contacts.rigid_contact_diff_point0_world.numpy()[:count],
+        )
+
+    @staticmethod
+    def _add_flat_heightfield(builder, *, xform=None):
+        """Add a flat unit heightfield to a model builder."""
+        heightfield = Heightfield(
+            data=np.zeros((21, 21), dtype=np.float32),
+            nrow=21,
+            ncol=21,
+            hx=1.0,
+            hy=1.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        builder.add_shape_heightfield(xform=xform, heightfield=heightfield)
+
+    def test_heightfield_box_penetration_uses_surface(self):
+        """Verify box penetration is resolved through the heightfield surface."""
+        half_z = 0.02
+        for depth in (0.005, 0.019, 0.021, 0.05):
+            with self.subTest(depth=depth):
+                builder = newton.ModelBuilder()
+                self._add_flat_heightfield(builder)
+
+                body = builder.add_body(xform=wp.transform((0.0, 0.0, half_z - depth), wp.quat_identity()))
+                builder.add_shape_box(body=body, hx=0.2, hy=0.065, hz=half_z)
+
+                model = builder.finalize()
+                distance, normal, point0 = self._get_contact_kinematics(model, model.state())
+
+                self.assertGreater(len(distance), 0, "no contacts between box and heightfield")
+                deepest = int(np.argmin(distance))
+                self.assertAlmostEqual(float(distance[deepest]), -depth, places=4)
+                self.assertGreater(float(normal[deepest][2]), 0.999)
+                self.assertAlmostEqual(float(point0[deepest][2]), 0.0, places=5)
+
+    def test_heightfield_no_contact_reaches_the_prism_interior(self):
+        """No contact may resolve against the volume a heightfield cell is extruded into.
+
+        ``support_map`` extrudes each cell triangle ``TRIANGLE_PRISM_EXTRUSION`` metres along -Z
+        so that GJK/MPR have a closed shape to work with. Only the top face is a real surface;
+        the skirt and the bottom cap are inside the terrain and cannot carry a contact. MPR
+        reports the face its ray from the Minkowski seed to the origin exits through, so seeding
+        a prism on its own top face lets that ray reverse as soon as the partner's center crosses
+        the surface -- from there the portal settles on the bottom cap and reports about a metre
+        of penetration with a normal pointing into the ground.
+
+        The collider here is a humanoid foot on terrain sampled at 0.1 m, so it spans several
+        cells at once and most of them do not own its deepest point. Depths on both sides of its
+        half-thickness are covered because that is where a seed on the surface changes behaviour.
+        Every contact is checked, not just the deepest one: a single contact reporting the prism
+        interior is enough to blow the solver up.
+        """
+        half = (0.2, 0.065, 0.0185)
+        for reduce_contacts in (False, True):
+            for depth in (0.005, 0.015, 0.019, 0.03, 0.05):
+                with self.subTest(reduce_contacts=reduce_contacts, depth=depth):
+                    builder = newton.ModelBuilder()
+                    self._add_flat_heightfield(builder)
+
+                    body = builder.add_body(xform=wp.transform((0.0, 0.0, half[2] - depth), wp.quat_identity()))
+                    builder.add_shape_box(body=body, hx=half[0], hy=half[1], hz=half[2])
+
+                    model = builder.finalize()
+                    distance, normal, _point0 = self._get_contact_kinematics(
+                        model, model.state(), reduce_contacts=reduce_contacts
+                    )
+
+                    self.assertGreater(len(distance), 0, "no contacts between box and heightfield")
+                    # The box cannot overlap the surface by more than its own extent, whatever
+                    # pose it is in, so anything deeper came from the extrusion.
+                    self.assertGreater(
+                        float(np.min(distance)),
+                        -max(half),
+                        f"a contact resolved against the prism interior: {np.min(distance)}",
+                    )
+                    self.assertGreater(
+                        float(np.min(normal[:, 2])),
+                        -0.5,
+                        f"a contact normal points into the terrain: {normal[int(np.argmin(normal[:, 2]))]}",
+                    )
+
+                    deepest = int(np.argmin(distance))
+                    self.assertAlmostEqual(float(distance[deepest]), -depth, places=4)
+                    self.assertGreater(float(normal[deepest][2]), 0.999)
+
+    def test_heightfield_sphere_penetration_uses_surface(self):
+        """Verify sphere penetration remains surface-normal below its center."""
+        radius = 0.02
+        for reduce_contacts in (False, True):
+            for depth in (0.005, 0.019, 0.021, 0.05):
+                with self.subTest(reduce_contacts=reduce_contacts, depth=depth):
+                    builder = newton.ModelBuilder()
+                    self._add_flat_heightfield(builder)
+
+                    body = builder.add_body(xform=wp.transform((0.0, 0.0, radius - depth), wp.quat_identity()))
+                    builder.add_shape_sphere(body=body, radius=radius)
+
+                    model = builder.finalize()
+                    distance, normal, point0 = self._get_contact_kinematics(
+                        model, model.state(), reduce_contacts=reduce_contacts
+                    )
+
+                    self.assertGreater(len(distance), 0, "no contacts between sphere and heightfield")
+                    deepest = int(np.argmin(distance))
+                    self.assertAlmostEqual(float(distance[deepest]), -depth, places=3)
+                    self.assertGreater(float(normal[deepest][2]), 0.999)
+                    self.assertAlmostEqual(float(point0[deepest][2]), 0.0, places=5)
+
+    def test_heightfield_sloped_penetration_uses_surface(self):
+        """Verify penetration follows a sloped heightfield face normal."""
+        slope = 0.25
+        radius = 0.05
+        depth = 0.08
+        x = np.linspace(-1.0, 1.0, 21, dtype=np.float32)
+        elevation = np.broadcast_to(slope * x, (21, 21)).copy()
+        expected_normal = np.array((-slope, 0.0, 1.0), dtype=np.float32)
+        expected_normal /= np.linalg.norm(expected_normal)
+
+        builder = newton.ModelBuilder()
+        heightfield = Heightfield(data=elevation, nrow=21, ncol=21, hx=1.0, hy=1.0)
+        builder.add_shape_heightfield(heightfield=heightfield)
+
+        center = expected_normal * (radius - depth)
+        body = builder.add_body(xform=wp.transform(wp.vec3(*center), wp.quat_identity()))
+        builder.add_shape_sphere(body=body, radius=radius)
+
+        model = builder.finalize()
+        distance, normal, point0 = self._get_contact_kinematics(model, model.state())
+
+        self.assertGreater(len(distance), 0, "no contacts between sphere and sloped heightfield")
+        deepest = int(np.argmin(distance))
+        self.assertAlmostEqual(float(distance[deepest]), -depth, places=3)
+        self.assertGreater(float(np.dot(normal[deepest], expected_normal)), 0.999)
+        self.assertAlmostEqual(float(point0[deepest][2] - slope * point0[deepest][0]), 0.0, places=5)
+
+    def test_heightfield_rotated_penetration_uses_surface(self):
+        """Verify penetration follows a transformed heightfield surface normal."""
+        radius = 0.05
+        depth = 0.08
+        rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.4)
+        expected_normal = np.asarray(wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0)), dtype=np.float32)
+
+        builder = newton.ModelBuilder()
+        self._add_flat_heightfield(builder, xform=wp.transform(wp.vec3(0.0), rotation))
+
+        center = expected_normal * (radius - depth)
+        body = builder.add_body(xform=wp.transform(wp.vec3(*center), wp.quat_identity()))
+        builder.add_shape_sphere(body=body, radius=radius)
+
+        model = builder.finalize()
+        distance, normal, point0 = self._get_contact_kinematics(model, model.state())
+
+        self.assertGreater(len(distance), 0, "no contacts between sphere and rotated heightfield")
+        deepest = int(np.argmin(distance))
+        self.assertAlmostEqual(float(distance[deepest]), -depth, places=3)
+        self.assertGreater(float(np.dot(normal[deepest], expected_normal)), 0.999)
+        self.assertAlmostEqual(float(np.dot(point0[deepest], expected_normal)), 0.0, places=5)
+
+    def test_heightfield_boundary_has_no_skirt_contact(self):
+        """Verify the heightfield boundary does not expose the prism skirt."""
+        radius = 0.02
+        builder = newton.ModelBuilder()
+        self._add_flat_heightfield(builder)
+
+        body = builder.add_body(xform=wp.transform((1.0 + radius + 0.01, 0.0, -0.05), wp.quat_identity()))
+        builder.add_shape_sphere(body=body, radius=radius)
+
+        model = builder.finalize()
+        distance, _normal, _point0 = self._get_contact_kinematics(model, model.state())
+
+        self.assertTrue(np.all(distance >= 0.0), f"penetrating boundary contacts: {distance}")
+
+    def test_heightfield_boundary_ignores_external_lowest_point(self):
+        """Ignore a penetrating support point outside the heightfield footprint."""
+        builder = newton.ModelBuilder()
+        self._add_flat_heightfield(builder)
+
+        rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.25 * wp.pi)
+        body = builder.add_body(xform=wp.transform((0.95, 0.0, 0.11), rotation))
+        builder.add_shape_box(body=body, hx=0.2, hy=0.05, hz=0.05)
+
+        model = builder.finalize()
+        for reduce_contacts in (False, True):
+            with self.subTest(reduce_contacts=reduce_contacts):
+                distance, normal, point0 = self._get_contact_kinematics(
+                    model, model.state(), reduce_contacts=reduce_contacts
+                )
+
+                self.assertGreater(len(distance), 0, "no contacts between box and heightfield boundary")
+                deepest = int(np.argmin(distance))
+                self.assertLess(float(distance[deepest]), -0.001)
+                self.assertGreater(float(distance[deepest]), -0.015, f"overestimated penetration: {distance}")
+                self.assertGreater(float(normal[deepest][2]), 0.999)
+                self.assertLessEqual(float(point0[deepest][0]), 1.0 + 1.0e-5)
+                self.assertAlmostEqual(float(point0[deepest][2]), 0.0, places=5)
 
     def test_heightfield_native_collision_scaled(self):
         """Per-instance ``scale`` on ``add_shape_heightfield`` is honored by narrow-phase.
@@ -530,6 +731,80 @@ class TestHeightfield(unittest.TestCase):
         soft_count = int(contacts.soft_contact_count.numpy()[0])
         self.assertGreater(soft_count, 0)
         self.assertEqual(int(contacts.soft_contact_shape.numpy()[0]), hfield_shape)
+
+    def test_create_from_mesh_sloped_plane(self):
+        """Rasterize a sloped plane mesh and verify sampled heights and placement."""
+        # A single-valued surface z = 0.5*x + 0.25*y over [0, 4] x [0, 8].
+        xs = np.linspace(0.0, 4.0, 9, dtype=np.float32)
+        ys = np.linspace(0.0, 8.0, 17, dtype=np.float32)
+        gx, gy = np.meshgrid(xs, ys)
+        gz = 0.5 * gx + 0.25 * gy
+        verts = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=-1).astype(np.float32)
+
+        rows, cols = gx.shape
+        faces = []
+        for r in range(rows - 1):
+            for c in range(cols - 1):
+                v00 = r * cols + c
+                v10 = v00 + 1
+                v01 = v00 + cols
+                v11 = v01 + 1
+                faces += [v00, v10, v11, v00, v11, v01]
+        mesh = wp.Mesh(
+            points=wp.array(verts, dtype=wp.vec3),
+            indices=wp.array(np.array(faces, dtype=np.int32), dtype=wp.int32),
+        )
+
+        hfield, xform = newton.Heightfield.create_from_mesh(mesh, resolution=0.5)
+
+        # Grid dimensions: col -> x (extent 4), row -> y (extent 8) at 0.5 m spacing.
+        self.assertEqual(hfield.ncol, 9)
+        self.assertEqual(hfield.nrow, 17)
+        self.assertAlmostEqual(hfield.hx, 2.0, places=5)
+        self.assertAlmostEqual(hfield.hy, 4.0, places=5)
+
+        # Placement centers the origin-centered grid on the mesh XY center.
+        origin = wp.transform_get_translation(xform)
+        self.assertAlmostEqual(origin[0], 2.0, places=4)
+        self.assertAlmostEqual(origin[1], 4.0, places=4)
+
+        # World heights (denormalized) must match the analytic plane at every sample.
+        world = hfield.min_z + hfield.data * (hfield.max_z - hfield.min_z)
+        expected = 0.5 * gx + 0.25 * gy
+        assert_np_equal(world, expected.astype(np.float32), tol=1e-3)
+
+    def test_rasterize_mesh_rejects_small_max_cells_per_axis(self):
+        """Reject a maximum grid dimension smaller than two."""
+        mesh = wp.Mesh(
+            points=wp.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                dtype=wp.vec3,
+            ),
+            indices=wp.array([0, 1, 2], dtype=wp.int32),
+        )
+
+        with self.assertRaisesRegex(ValueError, "max_cells_per_axis must be at least 2"):
+            newton.utils.rasterize_mesh_to_heightfield(mesh, resolution=0.5, max_cells_per_axis=1)
+
+    def test_rasterize_mesh_missed_rays_use_floor(self):
+        """Rasterize a mesh with a hole and verify missed rays fall back to min Z."""
+        # A flat quad at z = 1 covering only the +x half (x in [1, 2]) of the bounds,
+        # plus a lone low vertex at the origin so the mesh minimum Z is 0.
+        verts = np.array(
+            [[1.0, 0.0, 1.0], [2.0, 0.0, 1.0], [2.0, 2.0, 1.0], [1.0, 2.0, 1.0], [0.0, 0.0, 0.0]],
+            dtype=np.float32,
+        )
+        faces = np.array([0, 1, 2, 0, 2, 3], dtype=np.int32)
+        mesh = wp.Mesh(points=wp.array(verts, dtype=wp.vec3), indices=wp.array(faces, dtype=wp.int32))
+
+        heights, bounds = newton.utils.rasterize_mesh_to_heightfield(mesh, resolution=0.5)
+        self.assertEqual(bounds, (0.0, 0.0, 2.0, 2.0))
+
+        # Columns over the covered half (x >= 1) hit the quad at z = 1; columns over
+        # the uncovered half (x < 1) miss and fall back to the mesh minimum Z (0).
+        # Grid columns sample x = [0, 0.5, 1.0, 1.5, 2.0].
+        expected = np.tile([0.0, 0.0, 1.0, 1.0, 1.0], (heights.shape[0], 1)).astype(np.float32)
+        assert_np_equal(heights, expected, tol=1e-4)
 
 
 if __name__ == "__main__":

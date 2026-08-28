@@ -78,7 +78,12 @@ from .contact_reduction import (
     get_spatial_direction_2d,
     project_point_to_plane,
 )
-from .support_function import GeoTypeEx, extract_shape_data
+from .support_function import (
+    GeoTypeEx,
+    create_triangle_prism_penetration_refiner,
+    extract_shape_data,
+    support_map,
+)
 from .types import GeoType
 
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
@@ -857,8 +862,9 @@ class GlobalContactReducer:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_nbin_entry = wp.zeros(0, dtype=wp.int32, device=device)
 
-        # Per-contact dedup flags for cross-entry deduplication during export
-        self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
+        # Generic reduction deduplicates cross-entry winners during export.
+        # Hydroelastic reduction intentionally preserves and source-tags them.
+        self.exported_flags = wp.zeros(0 if store_hydroelastic_data else capacity, dtype=wp.int32, device=device)
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -1771,8 +1777,12 @@ def mesh_triangle_contacts_to_reducer_kernel(
         gap_b = shape_gap[shape_b]
         gap_sum = gap_a + gap_b
 
-        # Compute and write contacts using GJK/MPR
-        wp.static(create_compute_gjk_mpr_contacts(write_contact_to_reducer))(
+        wp.static(
+            create_compute_gjk_mpr_contacts(
+                write_contact_to_reducer,
+                penetration_refiner=create_triangle_prism_penetration_refiner(support_map),
+            )
+        )(
             shape_data_a,
             shape_data_b,
             quat_a,

@@ -176,6 +176,87 @@ def smooth_vertex_normals_by_position(
     return accum[inverse]
 
 
+def split_mesh_components(mesh: Mesh) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Split a triangle mesh into geometrically connected components.
+
+    Faces are connected when they share either a vertex index or vertices in the
+    same 1e-7 m position bucket. Coincident vertices are welded in the returned
+    topology so downstream mesh processing does not need to repair seams introduced
+    by duplicated normals or UV coordinates.
+
+    Args:
+        mesh: Triangle mesh to split.
+
+    Returns:
+        Connected components as ``(vertices, faces)`` pairs. Each ``vertices`` array
+        has shape ``[vertex_count, 3]`` and each ``faces`` array has shape
+        ``[face_count, 3]`` with component-local indices.
+    """
+
+    def find_face_roots(face_vertices: np.ndarray, vertex_count: int) -> np.ndarray:
+        """Label face components from their vertex IDs.
+
+        Args:
+            face_vertices: Triangle vertex IDs, shape ``[face_count, 3]``.
+            vertex_count: Number of unique vertex IDs.
+
+        Returns:
+            Root vertex ID for each face, shape ``[face_count]``.
+        """
+        parents = np.arange(vertex_count, dtype=np.int32)
+        left = np.concatenate((face_vertices[:, 0], face_vertices[:, 0]))
+        right = np.concatenate((face_vertices[:, 1], face_vertices[:, 2]))
+        # Vectorized root hooking avoids a Python graph walk for the common connected-mesh case.
+        while True:
+            previous_parents = parents.copy()
+            parents = parents[parents]
+            left_roots = parents[left]
+            right_roots = parents[right]
+            high_roots = np.maximum(left_roots, right_roots)
+            low_roots = np.minimum(left_roots, right_roots)
+            np.minimum.at(parents, high_roots, low_roots)
+            parents = parents[parents]
+            if np.array_equal(parents, previous_parents):
+                break
+        return parents[face_vertices[:, 0]]
+
+    faces = np.asarray(mesh.indices, dtype=np.int32).reshape(-1, 3)
+    if len(faces) <= 1:
+        return [(mesh.vertices, faces)]
+
+    face_roots = find_face_roots(faces, len(mesh.vertices))
+    component_roots, first_faces, component_sizes = np.unique(face_roots, return_index=True, return_counts=True)
+    if len(component_roots) == 1:
+        return [(mesh.vertices, faces)]
+
+    # UV seams and hard normals duplicate vertex indices without separating geometry.
+    canonical_vertices = mesh._canonical_vertex_ids()
+    canonical_vertex_count = int(np.max(canonical_vertices)) + 1
+    vertices = mesh.vertices
+    if canonical_vertex_count < len(mesh.vertices):
+        faces = canonical_vertices[faces]
+        _, first_vertices = np.unique(canonical_vertices, return_index=True)
+        vertices = vertices[first_vertices]
+        face_roots = find_face_roots(faces, canonical_vertex_count)
+        component_roots, first_faces, component_sizes = np.unique(face_roots, return_index=True, return_counts=True)
+        # Avoid forcing downstream mesh processing to repair seam-duplicated topology.
+        if len(component_roots) == 1:
+            return [(vertices, faces)]
+
+    face_order = np.argsort(face_roots, kind="stable")
+    component_offsets = np.concatenate(([0], np.cumsum(component_sizes)))
+    split_components = []
+    for component_index in np.argsort(first_faces):
+        component_face_indices = face_order[component_offsets[component_index] : component_offsets[component_index + 1]]
+        component_faces = faces[component_face_indices]
+        used_vertices, inverse = np.unique(component_faces.reshape(-1), return_inverse=True)
+        component_vertices = vertices[used_vertices]
+        component_faces = inverse.astype(np.int32, copy=False).reshape(-1, 3)
+        split_components.append((component_vertices, component_faces))
+
+    return split_components
+
+
 # Default number of segments for mesh generation
 default_num_segments = 32
 
@@ -1135,6 +1216,39 @@ def _extract_trimesh_material_params(
     return roughness, metallic, base_color
 
 
+def _is_gltf_file(filename: str) -> bool:
+    lower = filename.lower()
+    return lower.endswith(".gltf") or lower.endswith(".glb")
+
+
+def _load_trimesh_meshes_from_file(filename: str, trimesh_module):
+    """Load one or more trimesh meshes from a file.
+
+    glTF/GLB files are loaded with ``force="scene"`` so each primitive keeps its
+    own geometry, material, texture, and UV layout. Other formats, including DAE,
+    keep the v1.5.1 ``force="mesh"`` path.
+    """
+    if _is_gltf_file(filename):
+        loaded = trimesh_module.load(filename, force="scene")
+        if hasattr(loaded, "geometry"):
+            return list(loaded.geometry.values())
+
+    if filename.lower().endswith(".dae"):
+        with warnings.catch_warnings():
+            # Remove when the pycollada floor includes a release that replaces
+            # load-time NumPy array shape assignment with reshape.
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Setting the shape on a NumPy array has been deprecated.*",
+                category=DeprecationWarning,
+                module=r"^collada\.",
+            )
+            tri = trimesh_module.load(filename, force="mesh")
+    else:
+        tri = trimesh_module.load(filename, force="mesh")
+    return list(tri.geometry.values()) if hasattr(tri, "geometry") else [tri]
+
+
 def load_meshes_from_file(
     filename: str,
     *,
@@ -1347,20 +1461,7 @@ def load_meshes_from_file(
     if filename.lower().endswith(".dae"):
         dae_face_materials, dae_material_colors = _parse_dae_material_colors(filename)
 
-    if filename.lower().endswith(".dae"):
-        with warnings.catch_warnings():
-            # Remove when the pycollada floor includes a release that replaces
-            # load-time NumPy array shape assignment with reshape.
-            warnings.filterwarnings(
-                "ignore",
-                message=r"Setting the shape on a NumPy array has been deprecated.*",
-                category=DeprecationWarning,
-                module=r"^collada\.",
-            )
-            tri = trimesh.load(filename, force="mesh")
-    else:
-        tri = trimesh.load(filename, force="mesh")
-    tri_meshes = tri.geometry.values() if hasattr(tri, "geometry") else [tri]
+    tri_meshes = _load_trimesh_meshes_from_file(filename, trimesh)
 
     meshes = []
     for tri_mesh in tri_meshes:

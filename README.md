@@ -20,7 +20,7 @@ Newton was initiated by [Disney Research](https://www.disneyresearch.com/), [Goo
 - **OS:** Linux (x86-64, aarch64), Windows (x86-64), or macOS (CPU only)
 - **GPU:** NVIDIA GPU (Maxwell or newer), driver 545 or newer (CUDA 12). No local CUDA Toolkit installation required. macOS runs on CPU.
 
-For detailed system requirements, see the [installation guide](https://newton-physics.github.io/newton/latest/guide/installation.html). For tested configurations and Newton's versioning and deprecation policies, see the [compatibility guide](https://newton-physics.github.io/newton/latest/guide/compatibility.html).
+For detailed system requirements, see the [installation guide](https://newton-physics.github.io/newton/1.5.1/guide/installation.html). For tested configurations and Newton's versioning and deprecation policies, see the [compatibility guide](https://newton-physics.github.io/newton/1.5.1/guide/compatibility.html).
 
 ## Quickstart
 
@@ -29,7 +29,7 @@ pip install "newton[examples]"
 python -m newton.examples
 ```
 
-To install from source with [uv](https://docs.astral.sh/uv/), see the [installation guide](https://newton-physics.github.io/newton/latest/guide/installation.html).
+To install from source with [uv](https://docs.astral.sh/uv/), see the [installation guide](https://newton-physics.github.io/newton/1.5.1/guide/installation.html).
 
 ## Examples
 
@@ -142,7 +142,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_basic_dzhanibekov.jpg" alt="Dzhanibekov">
       </a>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/basic/example_basic_conveyor_forces.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_basic_conveyor_forces.jpg" alt="Conveyor Forces">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -151,7 +155,9 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%">
       <code>python -m newton.examples basic_dzhanibekov</code>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples basic_conveyor_forces</code>
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Robot Examples</h3></td>
@@ -283,6 +289,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cable/example_cable_plectoneme.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cable_plectoneme.jpg" alt="Cable Plectoneme">
+      </a>
     </td>
   </tr>
   <tr>
@@ -293,6 +302,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples cable_cross_slide_table</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples cable_plectoneme</code>
     </td>
   </tr>
   <tr>
@@ -749,6 +759,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/contacts/example_newton_cradle.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_newton_cradle.jpg" alt="Newton Cradle">
+      </a>
     </td>
   </tr>
   <tr>
@@ -757,6 +770,31 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td align="center" width="33%">
       <code>python -m newton.examples contacts_rj45_plug</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples newton_cradle</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/contacts/example_balance_bird.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_balance_bird.jpg" alt="Balance Bird">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/contacts/example_domino_spiral.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_domino_spiral.jpg" alt="Domino Spiral">
+      </a>
+    </td>
+    <td align="center" width="33%">
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples balance_bird</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples domino_spiral</code>
     </td>
     <td align="center" width="33%">
     </td>
@@ -880,11 +918,11 @@ python -m newton.examples basic_viewer --viewer gl --num-frames 500 --device cpu
 
 ## Contributing and Development
 
-See the [contribution guidelines](https://github.com/newton-physics/newton-governance/blob/main/CONTRIBUTING.md) and the [development guide](https://newton-physics.github.io/newton/latest/guide/development.html) for instructions on how to contribute to Newton.
+See the [contribution guidelines](https://github.com/newton-physics/newton-governance/blob/main/CONTRIBUTING.md) and the [development guide](https://newton-physics.github.io/newton/1.5.1/guide/development.html) for instructions on how to contribute to Newton.
 
 ## Support and Community Discussion
 
-For questions, please consult the [Newton documentation](https://newton-physics.github.io/newton/latest/guide/overview.html) first before creating [a discussion in the main repository](https://github.com/newton-physics/newton/discussions).
+For questions, please consult the [Newton documentation](https://newton-physics.github.io/newton/1.5.1/guide/overview.html) first before creating [a discussion in the main repository](https://github.com/newton-physics/newton/discussions).
 
 ## Code of Conduct
 
