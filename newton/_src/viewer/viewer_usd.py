@@ -372,6 +372,11 @@ class ViewerUSD(ViewerBase):
             tex_array = load_texture(texture)
             if tex_array is None:
                 return
+            if tex_array.dtype == np.uint8 and tex_array.ndim == 3 and tex_array.shape[-1] == 3:
+                rgba = np.empty((*tex_array.shape[:2], 4), dtype=np.uint8, order="C")
+                rgba[..., :3] = tex_array
+                rgba[..., 3] = 255
+                tex_array = rgba
             tex_dir = os.path.dirname(self.output_path)
             safe_name = mesh_name.replace("/", "_").replace("\\", "_")
             tex_path = os.path.join(tex_dir, f"_tex_{safe_name}.png")

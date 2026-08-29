@@ -162,6 +162,40 @@ class TestViewerUSD(unittest.TestCase):
         leaked = sorted(name for name in os.listdir(viewer._test_work_dir) if name.endswith(".tmp"))
         self.assertEqual(leaked, [])
 
+    def test_rgb_texture_export_is_opaque_rgba(self):
+        """Promote HxWx3 uint8 RGB arrays to opaque RGBA PNGs without mutating the source."""
+        from PIL import Image
+
+        viewer = self._make_viewer()
+        mesh_name = "/rgb_texture_mesh"
+        points = wp.array(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=wp.vec3,
+        )
+        indices = wp.array([0, 1, 2], dtype=wp.int32)
+        uvs = wp.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=wp.vec2)
+        texture = np.array(
+            [
+                [[10, 20, 30], [40, 50, 60]],
+                [[70, 80, 90], [100, 110, 120]],
+            ],
+            dtype=np.uint8,
+        )
+        source_before = texture.copy()
+
+        viewer.begin_frame(0.0)
+        viewer.log_mesh(mesh_name, points, indices, uvs=uvs, texture=texture)
+
+        np.testing.assert_array_equal(texture, source_before)
+        tex_path = self._logged_texture_path(viewer, mesh_name)
+        with Image.open(tex_path) as published:
+            self.assertEqual(published.mode, "RGBA")
+            published_arr = np.array(published)
+        self.assertEqual(published_arr.shape, (2, 2, 4))
+        self.assertEqual(published_arr.dtype, np.uint8)
+        np.testing.assert_array_equal(published_arr[..., :3], source_before)
+        np.testing.assert_array_equal(published_arr[..., 3], 255)
+
     def test_save_texture_atomic_cleans_up_tmp_on_failure(self):
         """A failure during the temp-file write must not leave a `.tmp` sibling behind."""
         viewer = self._make_viewer()
