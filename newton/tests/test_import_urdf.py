@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import json
 import os
 import tempfile
 import unittest
@@ -144,6 +145,81 @@ TEXTURED_DAE = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 TEXTURE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+
+
+def _write_two_geometry_textured_gltf(directory: Path) -> Path:
+    """Write a two-primitive glTF with distinct materials, textures, and UV layouts."""
+    from PIL import Image
+
+    Image.fromarray(np.full((2, 2, 3), (255, 0, 0), dtype=np.uint8)).save(directory / "tex_red.png")
+    Image.fromarray(np.full((2, 2, 3), (0, 0, 255), dtype=np.uint8)).save(directory / "tex_blue.png")
+
+    pos_a = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    uv_a = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    pos_b = np.array([[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]], dtype=np.float32)
+    uv_b = np.array([[1.0, 1.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    indices = np.array([0, 1, 2], dtype=np.uint16)
+
+    chunks = [pos_a.tobytes(), uv_a.tobytes(), indices.tobytes(), pos_b.tobytes(), uv_b.tobytes(), indices.tobytes()]
+    views = []
+    blob = bytearray()
+    for chunk in chunks:
+        pad = (4 - (len(blob) % 4)) % 4
+        blob.extend(b"\x00" * pad)
+        views.append({"byteOffset": len(blob), "byteLength": len(chunk)})
+        blob.extend(chunk)
+    blob.extend(b"\x00" * ((4 - (len(blob) % 4)) % 4))
+
+    def _accessor(view, component_type, count, type_name, extra=None):
+        accessor = {"bufferView": view, "componentType": component_type, "count": count, "type": type_name}
+        if extra:
+            accessor.update(extra)
+        return accessor
+
+    gltf = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1]}],
+        "nodes": [{"mesh": 0}, {"mesh": 1}],
+        "meshes": [
+            {
+                "name": "red_tri",
+                "primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}],
+            },
+            {
+                "name": "blue_tri",
+                "primitives": [{"attributes": {"POSITION": 3, "TEXCOORD_0": 4}, "indices": 5, "material": 1}],
+            },
+        ],
+        "materials": [
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}},
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 1}}},
+        ],
+        "textures": [{"source": 0}, {"source": 1}],
+        "images": [{"uri": "tex_red.png"}, {"uri": "tex_blue.png"}],
+        "buffers": [{"uri": "two_geom.bin", "byteLength": len(blob)}],
+        "bufferViews": [
+            {**views[0], "buffer": 0, "target": 34962},
+            {**views[1], "buffer": 0, "target": 34962},
+            {**views[2], "buffer": 0, "target": 34963},
+            {**views[3], "buffer": 0, "target": 34962},
+            {**views[4], "buffer": 0, "target": 34962},
+            {**views[5], "buffer": 0, "target": 34963},
+        ],
+        "accessors": [
+            _accessor(0, 5126, 3, "VEC3", {"min": pos_a.min(axis=0).tolist(), "max": pos_a.max(axis=0).tolist()}),
+            _accessor(1, 5126, 3, "VEC2"),
+            _accessor(2, 5123, 3, "SCALAR"),
+            _accessor(3, 5126, 3, "VEC3", {"min": pos_b.min(axis=0).tolist(), "max": pos_b.max(axis=0).tolist()}),
+            _accessor(4, 5126, 3, "VEC2"),
+            _accessor(5, 5123, 3, "SCALAR"),
+        ],
+    }
+    (directory / "two_geom.bin").write_bytes(bytes(blob))
+    path = directory / "two_geom.gltf"
+    path.write_text(json.dumps(gltf))
+    return path
+
 
 INERTIAL_URDF = """
 <robot name="inertial_test">
@@ -546,6 +622,46 @@ class TestImportUrdfBasic(unittest.TestCase):
                 ):
                     with self.assertRaises(DeprecationWarning):
                         load_meshes_from_file(str(dae_path), maxhullvert=0)
+
+    def test_gltf_scene_import_preserves_separate_geometry_materials(self):
+        """Keep glTF primitives as separate geometries with distinct materials, textures, and UVs."""
+        urdf = """
+<robot name="gltf_scene_test">
+    <link name="base_link">
+        <visual>
+            <geometry><mesh filename="two_geom.gltf"/></geometry>
+        </visual>
+    </link>
+</robot>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "robot.urdf").write_text(urdf)
+            _write_two_geometry_textured_gltf(temp_path)
+
+            builder = newton.ModelBuilder()
+            builder.add_urdf(str(temp_path / "robot.urdf"))
+
+            self.assertEqual(builder.shape_count, 2)
+            rgb_means = []
+            uv_sets = []
+            for i in range(builder.shape_count):
+                self.assertEqual(builder.shape_type[i], GeoType.MESH)
+                mesh = builder.shape_source[i]
+                self.assertIsNotNone(mesh.uvs)
+                self.assertGreaterEqual(mesh.uvs.shape[0], 3)
+                self.assertEqual(mesh.uvs.shape[1], 2)
+                self.assertFalse(np.allclose(mesh.uvs, 0.0))
+                self.assertIsNotNone(mesh.texture)
+                texture = newton.utils.load_texture(mesh.texture)
+                self.assertIsNotNone(texture)
+                rgb_means.append(np.asarray(texture)[..., :3].reshape(-1, 3).mean(axis=0))
+                uv_sets.append({tuple(np.round(row, 5)) for row in np.asarray(mesh.uvs)})
+
+            order = np.argsort([mean[0] - mean[2] for mean in rgb_means])
+            np.testing.assert_allclose(rgb_means[order[0]], [0.0, 0.0, 255.0], atol=1.0)
+            np.testing.assert_allclose(rgb_means[order[1]], [255.0, 0.0, 0.0], atol=1.0)
+            self.assertNotEqual(uv_sets[0], uv_sets[1])
 
     def test_inertial_params_urdf(self):
         builder = newton.ModelBuilder()

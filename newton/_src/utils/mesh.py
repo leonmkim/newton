@@ -1438,7 +1438,9 @@ def load_meshes_from_file(
     if filename.lower().endswith(".dae"):
         dae_face_materials, dae_material_colors = _parse_dae_material_colors(filename)
 
-    if filename.lower().endswith(".dae"):
+    if filename.lower().endswith((".gltf", ".glb")):
+        tri = trimesh.load(filename, force="scene")
+    elif filename.lower().endswith(".dae"):
         with warnings.catch_warnings():
             # Remove when the pycollada floor includes a release that replaces
             # load-time NumPy array shape assignment with reshape.
